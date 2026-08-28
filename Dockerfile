@@ -74,8 +74,16 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # module that was not there. The full tree goes under migrator/node_modules so
 # Node's upward lookup satisfies those requires without polluting the traced
 # standalone modules the server itself uses.
+#
+# Prisma 7 reads datasource.url from prisma.config.ts, and that file imports
+# dotenv and prisma/config — modules that exist only in the full tree. Config,
+# schema and migrations therefore all sit beside that tree, and the CLI runs
+# with migrator/ as its working directory, so every relative path inside the
+# config resolves exactly as it does during the build.
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./migrator/node_modules
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./migrator/prisma
+COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./migrator/prisma.config.ts
 
 COPY --chown=nextjs:nodejs docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
