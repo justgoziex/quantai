@@ -43,6 +43,22 @@ function ensureVertexCreds(): void {
   }
 }
 
+/*
+  Whether the run can actually search the web.
+
+  Only Vertex has grounding; Groq and the free Gemini key have no search tool
+  at all. The analysis prompt used to instruct the model to research online
+  regardless, which worked purely by luck — llama-3.3-70b ignored the
+  instruction and wrote the read anyway. Models that take instructions
+  literally instead emit search directives and stop, so the analysis came back
+  as raw tool-call markup.
+
+  The prompt now asks for research only when research is possible.
+*/
+export function webSearchAvailable(): boolean {
+  return vertexConfigured();
+}
+
 function vertexConfigured(): boolean {
   return Boolean(
     process.env.GOOGLE_VERTEX_API_KEY ||
