@@ -30,3 +30,9 @@ backups/
 
 # local tooling scratch
 .claude/settings.local.json
+
+# AI session transcripts — contain full command output including secrets
+claude-session*.jsonl
+claude-session*.jsonl.gz
+codex-session*.jsonl
+*.session.jsonl
