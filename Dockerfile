@@ -67,11 +67,15 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
-# Prisma CLI and schema, so migrations can be applied at start.
+# Prisma CLI for start-up migrations.
+#
+# Copying just the prisma and @prisma packages is not enough: the CLI requires
+# its own transitive dependencies, and cherry-picking them left it resolving a
+# module that was not there. The full tree goes under migrator/node_modules so
+# Node's upward lookup satisfies those requires without polluting the traced
+# standalone modules the server itself uses.
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.bin ./node_modules/.bin
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules ./migrator/node_modules
 
 COPY --chown=nextjs:nodejs docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
@@ -79,8 +83,8 @@ RUN chmod +x docker-entrypoint.sh
 USER nextjs
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=8s --start-period=60s --retries=5 \
+  CMD wget -qO- --timeout=6 http://127.0.0.1:3000/api/status >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["node", "server.js"]
