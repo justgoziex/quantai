@@ -1,0 +1,86 @@
+# syntax=docker/dockerfile:1
+
+###############################################################################
+# Quant AI — production image
+#
+# Three stages so the runtime carries only what it needs to serve:
+#   deps    installs node_modules (and generates the Prisma client via
+#           postinstall, since lib/generated is gitignored and never committed)
+#   builder compiles Next into .next/standalone
+#   runner  runs as an unprivileged user with the traced output only
+#
+# Migrations deliberately do NOT run here. A build that needs the database is a
+# build that cannot be reproduced, and applying schema changes while an image is
+# being assembled means they land whether or not that image is ever deployed.
+# They run at container start instead — see docker-entrypoint.sh.
+###############################################################################
+
+FROM node:22-alpine AS deps
+WORKDIR /app
+# openssl for Prisma's query engine; the toolchain because ws pulls in
+# bufferutil/utf-8-validate, which are native and compile from source on alpine.
+RUN apk add --no-cache libc6-compat openssl python3 make g++
+# .npmrc carries legacy-peer-deps, without which Privy's Solana peer ranges
+# make npm fail resolution here even though it installs cleanly locally.
+COPY package.json package-lock.json .npmrc ./
+COPY prisma ./prisma
+RUN npm ci
+
+
+FROM node:22-alpine AS builder
+WORKDIR /app
+RUN apk add --no-cache libc6-compat openssl
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Baked into the client bundle at build time, so they must be present now.
+ARG NEXT_PUBLIC_PRIVY_APP_ID
+ARG NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
+ARG NEXT_PUBLIC_SITE_URL
+ENV NEXT_PUBLIC_PRIVY_APP_ID=$NEXT_PUBLIC_PRIVY_APP_ID
+ENV NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=$NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
+ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
+
+# Prerendering touches the database. A URL that parses but resolves nowhere lets
+# Prisma initialise; the pages that query it already fall back when it is
+# unreachable, so the build completes without a live server.
+ARG DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build?sslmode=disable"
+ENV DATABASE_URL=$DATABASE_URL
+
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npx prisma generate && npm run build:image
+
+
+FROM node:22-alpine AS runner
+WORKDIR /app
+RUN apk add --no-cache libc6-compat openssl
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+RUN addgroup --system --gid 1001 nodejs \
+ && adduser --system --uid 1001 nextjs
+
+# The standalone server, plus the assets it does not trace.
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+
+# Prisma CLI and schema, so migrations can be applied at start.
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.bin ./node_modules/.bin
+
+COPY --chown=nextjs:nodejs docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
+
+USER nextjs
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3000/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+ENTRYPOINT ["./docker-entrypoint.sh"]
+CMD ["node", "server.js"]

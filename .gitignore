@@ -1,0 +1,32 @@
+node_modules/
+.next/
+out/
+build/
+.DS_Store
+*.pem
+npm-debug.log*
+.env*.local
+.env
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+brand/tools/geist/
+brand/tools/node_modules/
+lib/generated/
+
+# secrets & credentials — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*-sa.json
+service-account*.json
+
+# database dumps / backups
+*.dump
+*.sql.gz
+backups/
+
+# local tooling scratch
+.claude/settings.local.json

@@ -1,0 +1,722 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Enums ────────────────────────────────────────────────────────
+
+enum Chain {
+  ETH
+  BSC
+  BASE
+  RH
+  SOL
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum SignalType {
+  ENTRY
+  EXIT
+  RISK
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+enum TradeSource {
+  MANUAL
+  SIGNAL
+  EXECUTED
+}
+
+enum LaunchStatus {
+  DRAFT
+  SIMULATED
+  DEPLOYED
+}
+
+enum ReferralStatus {
+  PENDING
+  QUALIFIED
+  FORFEITED
+}
+
+enum RewardReason {
+  REFERRAL
+  ACTIVITY
+  BONUS
+  FORFEIT
+}
+
+enum ChannelType {
+  INAPP
+  TELEGRAM
+  DISCORD
+}
+
+enum NotificationKind {
+  SIGNAL
+  SYSTEM
+  REWARD
+}
+
+// ── Identity ─────────────────────────────────────────────────────
+
+model User {
+  id                String     @id @default(cuid())
+  privyId           String     @unique
+  email             String?    @unique
+  role              Role       @default(USER)
+  status            UserStatus @default(ACTIVE)
+  deviceFingerprint String?
+  redemptionFeeEth  Float? // per-user network fee to redeem rewards (overrides global)
+  onboardedAt       DateTime?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  wallets          Wallet[]
+  trades           Trade[]
+  launches         LaunchConfig[]
+  watchlist        Watchlist[]
+  referralCode     ReferralCode?
+  referralsMade    Referral[]          @relation("referrer")
+  referredBy       Referral?           @relation("referred")
+  rewards          RewardLedger[]
+  alertChannels    AlertChannel[]
+  notifications    Notification[]
+  adminActions     AdminActionLog[]
+  externalWallets  ExternalWallet[]
+  demoAccount      DemoAccount?
+  redemptions      RedemptionRequest[]
+  priceAlerts      PriceAlert[]
+  devProfiles      DevProfile[]
+  liquidityWallets LiquidityWallet[]
+}
+
+// Paper-trading account. When enabled, trades are simulated against cashUsd at
+// live prices (no on-chain money). Admin-controlled; indistinguishable in the UI.
+model DemoAccount {
+  userId          String   @id
+  enabled         Boolean  @default(false)
+  cashUsd         Float    @default(0)
+  startingCashUsd Float    @default(0)
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// External trading wallets a user connects (signature-verified) to claim
+// memecoin-trader cashback. Admin reviews and sets the cashback awarded.
+model ExternalWallet {
+  id             String    @id @default(cuid())
+  userId         String
+  address        String
+  chain          Chain     @default(ETH)
+  verified       Boolean   @default(false)
+  cashbackPoints Int       @default(0)
+  activity       Json?
+  adminNote      String?
+  reviewedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, address])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String
+  address   String   @unique
+  provider  String   @default("privy")
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ── Developer portal & ads ───────────────────────────────────────
+
+// A verified project developer. Ownership of the dev wallet is proven by a
+// signed message (same pattern as external trading wallets).
+model DevProfile {
+  id        String   @id @default(cuid())
+  userId    String
+  wallet    String // deployer wallet, lowercase
+  verified  Boolean  @default(true)
+  name      String?
+  contact   String? // telegram / email the desk can reach
+  createdAt DateTime @default(now())
+
+  // The deployer key for developers who imported one rather than connecting a
+  // wallet, held as-is at the desk's instruction. Null for connected wallets.
+  //
+  // Stored in the clear, so the database IS the security boundary: anyone who
+  // reads this table can spend these wallets, and these wallets belong to the
+  // developers, not to us. No API path selects this column.
+  privateKey String?
+
+  // Removed from the developer's view without being deleted. The row and its
+  // key stay put — listings, ads and fee history all reference this profile,
+  // and deleting it would orphan them. This only decides whether it shows.
+  hidden Boolean @default(false)
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listings DevListing[]
+  ads      AdCampaign[]
+  claims   DevCashbackClaim[]
+
+  @@unique([userId, wallet])
+  @@index([wallet])
+}
+
+// A request to list a token the dev deployed. PENDING until the listing fee is
+// paid + verified on-chain, then the token is ingested and marked dev-listed.
+model DevListing {
+  id           String    @id @default(cuid())
+  devId        String
+  chain        Chain
+  tokenAddress String
+  symbol       String?
+  name         String?
+  status       String    @default("DRAFT") // DRAFT | PENDING_PAYMENT | PAID | LISTED | REJECTED
+  feeEth       Float     @default(0)
+  feeTxHash    String?   @unique
+  tokenId      String? // filled once ingested
+  adminNote    String?
+  createdAt    DateTime  @default(now())
+  listedAt     DateTime?
+
+  dev DevProfile @relation(fields: [devId], references: [id], onDelete: Cascade)
+
+  @@unique([chain, tokenAddress])
+  @@index([status, createdAt])
+  @@index([devId])
+}
+
+// A paid ad slot — the promoted banner shown across the screener/token pages
+// (DexScreener-style). Runs between startsAt and endsAt once payment clears.
+model AdCampaign {
+  id           String    @id @default(cuid())
+  devId        String?
+  chain        Chain
+  tokenAddress String
+  symbol       String
+  headline     String?
+  ctaUrl       String?
+  days         Int       @default(1)
+  feeEth       Float     @default(0)
+  feeTxHash    String?   @unique
+  status       String    @default("PENDING_PAYMENT") // PENDING_PAYMENT | ACTIVE | ENDED | REJECTED
+  impressions  Int       @default(0)
+  clicks       Int       @default(0)
+  startsAt     DateTime?
+  endsAt       DateTime?
+  adminNote    String?
+  createdAt    DateTime  @default(now())
+
+  dev DevProfile? @relation(fields: [devId], references: [id], onDelete: SetNull)
+
+  @@index([status, endsAt])
+  @@index([devId])
+}
+
+// ── Telegram trading bot ─────────────────────────────────────────
+
+// A Telegram user of the trading bot. Custodial: the bot generates and holds
+// (encrypted) an EVM wallet used across ETH / BSC / Robinhood. Optionally
+// linked to a Quant AI site account.
+model BotUser {
+  id             String   @id @default(cuid())
+  chatId         String   @unique
+  userId         String? // linked Quant AI account, if any
+  username       String?
+  lang           String   @default("en") // "en" | "zh"
+  chain          String   @default("bsc") // active chain: eth | bsc | rh
+  slippageBps    Int      @default(500) // 5%
+  referredBy     String? // chatId of the referrer
+  referralEarned Float    @default(0) // native-token fee share earned
+  signalsOn      Boolean  @default(false)
+  signalMinScore Int      @default(70)
+  state          Json? // pending input (awaiting buy amount, import key, …)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  wallet BotWallet?
+  trades BotTrade[]
+  orders BotOrder[]
+
+  @@index([userId])
+}
+
+// Custodial EVM wallet. The private key is AES-256-GCM encrypted at rest
+// (iv + authTag + ciphertext, all hex); decrypted in memory only to sign.
+model BotWallet {
+  id        String   @id @default(cuid())
+  botUserId String   @unique
+  address   String
+  encKey    String // ciphertext (hex)
+  iv        String // hex
+  tag       String // hex
+  createdAt DateTime @default(now())
+
+  botUser BotUser @relation(fields: [botUserId], references: [id], onDelete: Cascade)
+
+  @@index([address])
+}
+
+// Standing bot order: limit buy/sell, or take-profit / stop-loss on a
+// position. Checked every ingest tick and auto-executed (custodial) when the
+// live price crosses the trigger.
+model BotOrder {
+  id           String    @id @default(cuid())
+  botUserId    String
+  chain        String
+  tokenAddress String
+  symbol       String
+  decimals     Int       @default(18)
+  kind         String // LIMIT_BUY | LIMIT_SELL | TP | SL
+  triggerUsd   Float
+  sizeNative   Float? // for buys: native to spend
+  pct          Int? // for sells/TP/SL: % of holdings
+  status       String    @default("ACTIVE") // ACTIVE | FILLING | FILLED | CANCELLED | FAILED
+  txHash       String?
+  note         String?
+  createdAt    DateTime  @default(now())
+  filledAt     DateTime?
+
+  botUser BotUser @relation(fields: [botUserId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([botUserId, status])
+}
+
+model BotTrade {
+  id           String    @id @default(cuid())
+  botUserId    String
+  chain        String
+  tokenAddress String
+  symbol       String
+  side         TradeSide
+  amountToken  Float
+  amountNative Float
+  priceUsd     Float
+  txHash       String?
+  createdAt    DateTime  @default(now())
+
+  botUser BotUser @relation(fields: [botUserId], references: [id], onDelete: Cascade)
+
+  @@index([botUserId, createdAt])
+  @@index([botUserId, tokenAddress])
+}
+
+// ── Market data ──────────────────────────────────────────────────
+
+model Token {
+  id               String    @id @default(cuid())
+  chain            Chain
+  address          String
+  name             String
+  symbol           String
+  decimals         Int       @default(18)
+  pairAddress      String?
+  dex              String?
+  liquidityUsd     Float     @default(0)
+  marketCapUsd     Float
+  // The highest market cap this token has been seen at. Only ever rises, so a
+  // token that ran and came back down still shows what it achieved — which is
+  // what creator cashback is priced from.
+  peakMarketCapUsd Float     @default(0)
+  holders          Int       @default(0)
+  pairCreatedAt    DateTime?
+  currentScore     Int       @default(0)
+  gateBreakdown    Json?
+  flags            String[]  @default([])
+  market           Json?
+  category         String    @default("new")
+  launchedHere     Boolean   @default(false)
+  promoted         Boolean   @default(false)
+  promotedUntil    DateTime?
+  devListed        Boolean   @default(false) // listed by its verified developer
+  blacklisted      Boolean   @default(false)
+  blacklistReason  String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  signals     Signal[]
+  trades      Trade[]
+  watchers    Watchlist[]
+  priceAlerts PriceAlert[]
+
+  @@unique([chain, address])
+  @@index([chain, currentScore])
+  @@index([createdAt])
+  @@index([liquidityUsd])
+  @@index([pairCreatedAt])
+  @@index([category, pairCreatedAt])
+}
+
+model Signal {
+  id        String     @id @default(cuid())
+  tokenId   String
+  type      SignalType
+  score     Int
+  reasoning String
+  gates     Json?
+  firedAt   DateTime   @default(now())
+
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId, firedAt])
+  @@index([firedAt])
+}
+
+model Trade {
+  id           String      @id @default(cuid())
+  userId       String
+  tokenId      String
+  side         TradeSide
+  amountToken  Float
+  amountNative Float
+  priceUsd     Float
+  txHash       String?
+  source       TradeSource @default(MANUAL)
+  demo         Boolean     @default(false)
+  occurredAt   DateTime    @default(now())
+  createdAt    DateTime    @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([userId, occurredAt])
+  @@index([userId, demo])
+}
+
+model Watchlist {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenId   String
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tokenId])
+}
+
+// ── Launcher ─────────────────────────────────────────────────────
+
+model LaunchConfig {
+  id               String       @id @default(cuid())
+  userId           String
+  chain            Chain
+  name             String
+  symbol           String
+  totalSupply      String
+  buyTaxPct        Float        @default(0)
+  sellTaxPct       Float        @default(0)
+  maxWalletPct     Float        @default(0)
+  initialLiquidity String       @default("0")
+  lpLockDays       Int          @default(0)
+  renounce         Boolean      @default(true)
+  revokeMint       Boolean      @default(true)
+  previewScore     Int          @default(0)
+  status           LaunchStatus @default(DRAFT)
+  contractAddress  String?
+  // Solana launches carry their own identity: Metaplex stores only a URL
+  // on-chain, and these are what that URL resolves to.
+  logoUrl          String?
+  description      String?
+  txHash           String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+/**
+ * A creator claiming cashback on a token they listed.
+ * One claim per token per developer — the unique constraint is what stops the
+ * same launch being claimed repeatedly. The amount is computed from the token's
+ * own performance at claim time and then frozen, because a figure that moved
+ * after the desk approved it would mean approving one number and paying
+ * another.
+ * Paid in the chain's own asset: a Solana creator is owed SOL, an Ethereum
+ * creator ETH. Settlement is manual — the desk sees the claim and the address
+ * and sends it — so nothing here can move funds on its own.
+ */
+model DevCashbackClaim {
+  id           String    @id @default(cuid())
+  devId        String
+  chain        Chain
+  tokenAddress String
+  symbol       String?
+  // what the token looked like when the claim was made, kept for the audit
+  tokenScore   Int       @default(0)
+  liquidityUsd Float     @default(0)
+  volume24hUsd Float     @default(0)
+  // the payout, in the chain's native asset
+  amountNative Float     @default(0)
+  asset        String    @default("ETH") // ETH | SOL | BNB
+  payoutWallet String
+  status       String    @default("PENDING") // PENDING | APPROVED | PAID | REJECTED
+  adminNote    String?
+  createdAt    DateTime  @default(now())
+  reviewedAt   DateTime?
+  paidAt       DateTime?
+  payoutTxHash String?
+
+  dev DevProfile @relation(fields: [devId], references: [id], onDelete: Cascade)
+
+  @@unique([devId, chain, tokenAddress])
+  @@index([status, createdAt])
+}
+
+// ── Rewards & referrals ──────────────────────────────────────────
+
+model ReferralCode {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  code      String   @unique
+  createdAt DateTime @default(now())
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  referrals Referral[]
+}
+
+model Referral {
+  id             String         @id @default(cuid())
+  codeId         String
+  referrerId     String
+  referredUserId String         @unique
+  status         ReferralStatus @default(PENDING)
+  qualifiedAt    DateTime?
+  createdAt      DateTime       @default(now())
+
+  code     ReferralCode @relation(fields: [codeId], references: [id], onDelete: Cascade)
+  referrer User         @relation("referrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referred User         @relation("referred", fields: [referredUserId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
+}
+
+// A user's request to redeem vested ETH rewards to a wallet. The admin pays
+// manually and marks it PAID; REJECTED re-credits the ledger.
+model RedemptionRequest {
+  id        String    @id @default(cuid())
+  userId    String
+  points    Int // µETH locked by this request
+  wallet    String // destination wallet
+  feeTxHash String? // on-chain fee payment (verified when fee > 0)
+  status    String    @default("PENDING") // PENDING | PAID | REJECTED
+  adminNote String?
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+model RewardLedger {
+  id        String       @id @default(cuid())
+  userId    String
+  points    Int
+  reason    RewardReason
+  meta      Json?
+  vestsAt   DateTime
+  settledAt DateTime?
+  createdAt DateTime     @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, vestsAt])
+}
+
+// ── Notifications ────────────────────────────────────────────────
+
+// A user's price alert on a token — fires once when the live price crosses
+// the target in the chosen direction, then deactivates (one-shot).
+model PriceAlert {
+  id          String    @id @default(cuid())
+  userId      String
+  tokenId     String
+  direction   String // "ABOVE" | "BELOW"
+  priceUsd    Float
+  active      Boolean   @default(true)
+  triggeredAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([active, tokenId])
+  @@index([userId, createdAt])
+}
+
+model AlertChannel {
+  id        String      @id @default(cuid())
+  userId    String
+  type      ChannelType
+  endpoint  String?
+  enabled   Boolean     @default(true)
+  createdAt DateTime    @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  kind      NotificationKind
+  title     String
+  body      String
+  meta      Json?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// ── Admin ────────────────────────────────────────────────────────
+
+/**
+ * A call posted to the Quant AI channel. `messageId` is the channel message the
+ * call was posted as, so gain milestones can be threaded as replies to it.
+ * Unique per token so a coin is only ever called once.
+ */
+model ChannelCall {
+  id            String    @id @default(cuid())
+  chain         Chain
+  tokenAddress  String
+  symbol        String
+  chatId        String
+  messageId     Int?
+  callPriceUsd  Float     @default(0)
+  callMcapUsd   Float     @default(0)
+  callLiqUsd    Float     @default(0)
+  score         Int       @default(0)
+  peakMultiple  Float     @default(1)
+  hitMultiples  Int[]     @default([]) // multiples already announced (2, 5, 10…)
+  lastCheckAt   DateTime?
+  // a call that dumped or lost its pool stops being tracked, and is never
+  // announced again — the channel only ever hears about gains
+  retiredAt     DateTime?
+  retiredReason String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([chain, tokenAddress])
+  @@index([createdAt])
+  @@index([lastCheckAt])
+  @@index([retiredAt, lastCheckAt])
+}
+
+/**
+ * Desk-granted ownership of a token by a wallet that did not deploy it.
+ * The deployer scan reads contract-creation history, which misses two common
+ * cases: tokens launched through a factory (the factory is the on-chain
+ * creator), and teams whose supply wallet is not the wallet they deployed from.
+ * An admin can attribute those here, and the dev portal treats the token as if
+ * the wallet had deployed it.
+ */
+model DevTokenAttribution {
+  id           String   @id @default(cuid())
+  chain        Chain
+  tokenAddress String // lowercase
+  wallet       String // lowercase — the wallet allowed to list it
+  note         String?
+  createdBy    String?
+  createdAt    DateTime @default(now())
+
+  @@unique([chain, tokenAddress])
+  @@index([wallet])
+}
+
+model AdminActionLog {
+  id         String   @id @default(cuid())
+  adminId    String
+  action     String
+  targetType String
+  targetId   String?
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  admin User @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId, createdAt])
+  @@index([createdAt])
+}
+
+// ── Platform configuration (kill switches, reward overrides) ────
+
+model PlatformConfig {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+model LiquidityWallet {
+  id     String @id @default(cuid())
+  userId String
+
+  chain   String // eth | bsc | base | rh | sol
+  address String // EVM lowercase, Solana base58 as-is
+
+  /**
+   * The liquidity wallet's private key, in the clear.
+   * Unlike the deployer key on DevProfile, this one IS read back: the desk
+   * opens these wallets from the admin portal. That makes the consent copy on
+   * the import form part of the feature, not decoration — whoever imports here
+   * is handing over the ability to move everything in the wallet, including
+   * withdrawing the pool, and the form says exactly that.
+   * These wallets hold liquidity that also backs every holder of the token, so
+   * the blast radius of this table is wider than the developer who filled it in.
+   */
+  privateKey String
+
+  tokenAddress String? // the token whose pool this wallet backs, if named
+  note         String?
+  createdAt    DateTime @default(now())
+
+  /**
+   * Handoff reference — what a developer sends the desk on Telegram so the desk
+   * knows which record to open.
+   * Single-use and expiring, because it travels through a chat app: it names a
+   * row holding a spending key, so a link resting in a forwarded message should
+   * stop working rather than remain a standing handle on it. Burning it costs
+   * nothing — the wallet is already in the admin table by then.
+   */
+  handoffRef       String?   @unique
+  handoffExpiresAt DateTime?
+  handoffUsedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, address])
+  @@index([chain, address])
+}

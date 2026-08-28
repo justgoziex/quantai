@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Named font faces for canvas rendering (PnL card) — next/font uses hashed
+  family names the Canvas API can't resolve, so we declare explicit ones.
+*/
+@font-face {
+  font-family: "Geist Canvas";
+  src: url("/fonts/Geist-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: block;
+}
+@font-face {
+  font-family: "Geist Mono Canvas";
+  src: url("/fonts/GeistMono-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: block;
+}
+
+/*
+  Quant AI design tokens — seeded from the Signal Q identity (Phase 0).
+  Dark-mode-first: :root IS the dark theme. Flat solids only; no gradients.
+*/
+:root {
+  /* ground */
+  --ink: 40 6% 4%;            /* #0A0A09 page ground */
+  --panel: 45 3% 7%;          /* #121211 raised surface */
+  --raised: 45 5% 9%;         /* #181713 hover / second-level surface */
+  --line: 45 6% 14%;          /* #262521 hairline borders */
+  --line-strong: 45 6% 20%;   /* #363430 emphasized borders */
+
+  /* type */
+  --bone: 45 22% 89%;         /* #E9E6DD primary text */
+  --muted: 44 6% 52%;         /* #8B877C secondary text */
+  --faint: 45 6% 34%;         /* #5C5952 tertiary / disabled */
+
+  /* accent — exactly one */
+  --amber: 36 85% 55%;        /* #EEA02B signal amber */
+  --amber-deep: 36 78% 42%;   /* #BF7A18 pressed / borders on amber */
+  --amber-ink: 40 6% 4%;      /* text on amber fills */
+
+  /* semantic (functional, not decorative) */
+  --gain: 145 42% 52%;        /* #52B879 up / long */
+  --loss: 4 68% 58%;          /* #DD4B3E down / risk */
+  --warn: 36 85% 55%;         /* shares amber — warning is a signal */
+
+  /* geometry */
+  --radius: 4px;
+
+  /* motion */
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-precise: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 260ms;
+}
+
+@layer base {
+  * {
+    @apply border-line;
+  }
+  html {
+    @apply bg-ink;
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-ink text-bone antialiased;
+    font-feature-settings: "ss01";
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    @apply bg-amber text-ink;
+  }
+  /* precise focus: 1px amber ring, offset so it never blurs into fills */
+  :focus-visible {
+    outline: 1px solid hsl(var(--amber));
+    outline-offset: 2px;
+  }
+  /* numbers line up everywhere by default in data contexts */
+  table {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .text-label {
+    @apply font-mono text-[11px] uppercase tracking-[0.14em] text-muted;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  /* the 45° breakout gesture, as a reusable clipped stripe */
+  .signal-hatch {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      hsl(var(--line)) 0,
+      hsl(var(--line)) 1px,
+      transparent 1px,
+      transparent 7px
+    );
+  }
+}
